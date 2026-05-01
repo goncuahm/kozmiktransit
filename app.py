@@ -34,7 +34,7 @@ warnings.filterwarnings("ignore")
 
 # ── Ephemeris source — update this URL to match your GitHub repo ──────────────
 EPHEMERIS_URL = (
-    "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/"
+    "https://raw.githubusercontent.com/goncuahm/kozmiktransit/"
     "main/planet_degrees.csv"
 )
 
