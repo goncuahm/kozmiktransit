@@ -255,7 +255,7 @@ with st.sidebar:
     default_end = today + datetime.timedelta(days=365)
 
     start_date = st.date_input(
-        "Data Start Date", value=datetime.date(2000, 1, 1),
+        "Data Start Date", value=datetime.date(1987, 1, 1),
         min_value=datetime.date(1950, 1, 1), max_value=today,
     )
     forecast_end = st.date_input(
