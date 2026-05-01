@@ -55,7 +55,7 @@ ALL_PLANETS_ORDERED = [
     "pluto", "true_node", "chiron",
 ]
 DEFAULT_INNER = ["sun", "moon", "mercury", "venus", "mars"]
-DEFAULT_SIGN  = ["mercury", "venus", "mars"]
+DEFAULT_SIGN  = ["moon","sun","mercury", "venus", "mars"]
 
 ASPECTS   = [0, 60, 90, 120, 180]
 ASP_NAMES = {0: "Conj", 60: "Sext", 90: "Sqr", 120: "Trin", 180: "Opp"}
@@ -243,11 +243,11 @@ with st.sidebar:
     # ── Stock settings ────────────────────────────────────────────────────────
     st.markdown("### 📈 Stock Settings")
     ticker = st.text_input(
-        "Stock Ticker", value="GC=F",
+        "Stock Ticker", value="SI=F",
         help="Yahoo Finance ticker, e.g. GC=F, SI=F, AAPL, BTC-USD",
     )
     stock_name = st.text_input(
-        "Display Name", value="Gold Futures",
+        "Display Name", value="Silver Futures",
         help="Used in chart titles and labels",
     )
 
@@ -267,10 +267,10 @@ with st.sidebar:
 
     # ── Orb settings ──────────────────────────────────────────────────────────
     st.markdown("### 🔭 Orb Settings")
-    orb_apply = st.slider("Applying Orb (°)", min_value=0.5, max_value=10.0,
-                          value=4.0, step=0.5)
+    orb_apply = st.slider("Applying Orb (°)", min_value=0.5, max_value=6.0,
+                          value=4.5, step=0.25)
     orb_sep   = st.slider("Separating Orb (°)", min_value=0.5, max_value=5.0,
-                          value=1.0, step=0.5)
+                          value=1.0, step=0.25)
 
     st.markdown("<hr class='gold'/>", unsafe_allow_html=True)
 
