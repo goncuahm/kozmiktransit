@@ -1051,9 +1051,9 @@ st.markdown("---")
 st.markdown("<h2>🕐 Last 10 Trading Days — Directional Signal</h2>", unsafe_allow_html=True)
 
 n_total   = len(dates_all)
-last10    = list(range(max(0, n_total - 10), n_total))
+last100    = list(range(max(0, n_total - 100), n_total))
 hist_rows = []
-for pos in last10:
+for pos in last100:
     d         = dates_all[pos]
     close_val = float(price_df.loc[d, "Close"])
     prev      = float(price_df.iloc[pos - 1]["Close"]) if pos > 0 else float("nan")
