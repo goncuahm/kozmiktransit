@@ -1100,8 +1100,8 @@ ols_hits = sum(1 for r in hist_rows if r["OLS ✓"] == "✓")
 log_hits = sum(1 for r in hist_rows if r["Logit ✓"] == "✓")
 n_h      = len(hist_rows)
 c1, c2   = st.columns(2)
-c1.markdown(metric_html("OLS Hit Rate (last 10d)",   f"{ols_hits}/{n_h}", f"{ols_hits/n_h*100:.0f}%"), unsafe_allow_html=True)
-c2.markdown(metric_html("Logit Hit Rate (last 10d)", f"{log_hits}/{n_h}", f"{log_hits/n_h*100:.0f}%"), unsafe_allow_html=True)
+c1.markdown(metric_html("OLS Hit Rate (last 100d)",   f"{ols_hits}/{n_h}", f"{ols_hits/n_h*100:.0f}%"), unsafe_allow_html=True)
+c2.markdown(metric_html("Logit Hit Rate (last 100d)", f"{log_hits}/{n_h}", f"{log_hits/n_h*100:.0f}%"), unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
