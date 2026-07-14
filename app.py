@@ -57,8 +57,8 @@ ALL_PLANETS_ORDERED = [
 DEFAULT_INNER = ["sun", "moon", "mercury", "venus", "mars"]
 DEFAULT_SIGN  = ["moon","sun","mercury", "venus", "mars"]
 
-ASPECTS   = [0, 60, 90, 120, 180]
-ASP_NAMES = {0: "Conj", 60: "Sext", 90: "Sqr", 120: "Trin", 180: "Opp"}
+ASPECTS   = [0, 45, 60, 90, 120, 180]
+ASP_NAMES = {0: "Conj", 45: "45" ,60: "Sext", 90: "Sqr", 120: "Trin", 180: "Opp"}
 SIGNS     = [
     "Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo",
     "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces",
