@@ -268,7 +268,7 @@ with st.sidebar:
     # ── Orb settings ──────────────────────────────────────────────────────────
     st.markdown("### 🔭 Orb Settings")
     orb_apply = st.slider("Applying Orb (°)", min_value=0.5, max_value=6.0,
-                          value=4.5, step=0.25)
+                          value=5.0, step=0.25)
     orb_sep   = st.slider("Separating Orb (°)", min_value=0.5, max_value=5.0,
                           value=1.0, step=0.25)
 
