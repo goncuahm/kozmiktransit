@@ -226,6 +226,36 @@ def metric_html(label, value, sub=""):
     )
 
 
+def calibrate_ols_fitted(y_fit_full, actual_window, start_pos, vol_scale):
+    """
+    Rebase a slice of full-sample OLS fitted daily returns so the resulting
+    cumulative price path starts AND ends exactly on the actual price for
+    that window, with day-to-day variation scaled by vol_scale so it's
+    visually comparable to realized volatility. This does not change the
+    model's actual R² / predictive power — it's a visualization rescaling
+    applied on top of the raw fit.
+    """
+    steps = y_fit_full[start_pos:][1:]           # drop day0 (baseline, no prior return)
+    dev = steps - steps.mean()
+    target_growth = np.log(actual_window[-1] / actual_window[0])
+    mean_target = target_growth / len(steps)
+    scaled_steps = mean_target + dev * vol_scale
+    return actual_window[0] * np.exp(np.concatenate([[0.0], np.cumsum(scaled_steps)]))
+
+
+def scale_ols_forecast(step_returns, anchor_price, vol_scale):
+    """
+    Amplify the day-to-day variation of a forecasted return series around
+    its own mean (the model's own forward drift is preserved — there's no
+    actual future price to anchor an endpoint to), then compound forward
+    from anchor_price. Uses the same vol_scale factor as the fitted lines
+    so forecast and history read on one consistent visual scale.
+    """
+    dev = step_returns - step_returns.mean()
+    scaled_steps = step_returns.mean() + dev * vol_scale
+    return anchor_price * np.exp(np.cumsum(scaled_steps))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
@@ -455,7 +485,7 @@ cumret_ols_fit = first_close * np.exp(np.cumsum(y_fit_ols_full))
 log_step       = y_fit_log_full * np.abs(y_ret)
 cumret_log_fit = first_close * np.exp(np.cumsum(log_step))
 last_actual    = close_all[-1]
-last_ols_fit   = cumret_ols_fit[-1]   # used in Plots 2, 3 connectors
+last_ols_fit   = cumret_ols_fit[-1]   # == last_actual (OLS w/ intercept); kept for the fitted CSV export
 last_log_fit   = cumret_log_fit[-1]
 
 ols_is_r2   = r2_score(y_ret, y_fit_ols_full)
@@ -491,6 +521,28 @@ with st.spinner("Generating forecast …"):
 
 n_up   = int((y_fore_log == 1).sum())
 n_down = int((y_fore_log == -1).sum())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  OLS VOLATILITY SCALE (shared across Charts 1–3)
+# ══════════════════════════════════════════════════════════════════════════════
+# One scale factor, computed once from the trailing 12 months, applied
+# everywhere the OLS line is charted (fitted history AND forecast) so the
+# whole OLS story reads on one consistent visual scale. This is purely a
+# chart-rendering rescale: the Model Summary metrics, the Next-3-Days boxes,
+# and the CSV downloads all continue to use the raw, unscaled model output.
+_vol_last_year_start = dates_all[-1] - pd.DateOffset(months=12)
+_vol_mask_12m         = dates_all >= _vol_last_year_start
+_vol_start_pos_12m    = int(np.where(_vol_mask_12m)[0][0])
+_vol_fit_steps        = y_fit_ols_full[_vol_start_pos_12m:][1:]
+_vol_actual_steps     = y_ret[_vol_start_pos_12m:][1:]
+_vol_fit_std          = (_vol_fit_steps - _vol_fit_steps.mean()).std()
+_vol_actual_std       = _vol_actual_steps.std()
+ols_vol_scale = _vol_actual_std / _vol_fit_std if _vol_fit_std > 1e-12 else 1.0
+
+# Full-horizon forecast, volatility-matched — Charts 1–3 all slice into this
+# same array so the fitted-to-forecast handoff is seamless everywhere.
+fore_ols_cum_scaled = scale_ols_forecast(y_fore_ols_r, last_actual, ols_vol_scale)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -571,32 +623,11 @@ actual_ly       = close_all[mask_ly]
 # Integer position of window start in the full arrays
 window_start_pos = int(np.where(mask_ly)[0][0])
 
-# OLS: cumulate log-returns within the window, calibrated so the fitted path
-# starts AND ends on the actual price, with day-to-day variation rescaled to
-# match the realized volatility of actual returns over the same window.
-#
-# Why this is needed: the model's raw fitted daily returns are tiny (this is
-# exactly what the "OLS In-Sample R²" metric above already reports — a low R²
-# means the aspects barely move the day-to-day return away from the average
-# drift). Compounded as-is, those tiny numbers produce a near-straight line.
-# Rescaling makes the model's up/down *pattern* visible on the same scale as
-# the real price swings. It does NOT change the model's actual predictive
-# power — R² is computed from the unscaled fit and is unaffected by this.
-ols_ret_win  = y_fit_ols_full[window_start_pos:]
-ols_steps    = ols_ret_win[1:]                      # same "drop first day" convention as before
-ols_dev      = ols_steps - ols_steps.mean()         # zero-mean shape of the model's daily calls
-actual_steps = y_ret[window_start_pos:][1:]         # realized daily returns, same window
-fit_std      = ols_dev.std()
-actual_std   = actual_steps.std()
-ols_vol_scale = actual_std / fit_std if fit_std > 1e-12 else 1.0
-
-target_growth_ols = np.log(actual_ly[-1] / actual_ly[0])   # actual log-return, start->end
-mean_target_ols   = target_growth_ols / len(ols_steps)
-ols_steps_scaled  = mean_target_ols + ols_dev * ols_vol_scale
-
-ols_fit_ly = actual_ly[0] * np.exp(
-    np.concatenate([[0.0], np.cumsum(ols_steps_scaled)])
-)
+# OLS fitted: calibrated so the path starts AND ends on the actual price for
+# this window, with day-to-day variation scaled to realized volatility (see
+# the "OLS VOLATILITY SCALE" section above — ols_vol_scale is shared with
+# Charts 2 and 3 so the OLS line reads on one consistent scale everywhere).
+ols_fit_ly = calibrate_ols_fitted(y_fit_ols_full, actual_ly, window_start_pos, ols_vol_scale)
 
 # Logistic: cumulate signed-|return| steps within the window, same rebase
 log_step_win = y_fit_log_full[window_start_pos:] * np.abs(y_ret[window_start_pos:])
@@ -609,7 +640,7 @@ last_ols_fit_ly = float(ols_fit_ly[-1])
 last_log_fit_ly = float(log_fit_ly[-1])
 
 fore_dates_3m = fut_dates[:TRADING_MONTH]
-fore_ols_3m   = fore_ols_cum[:TRADING_MONTH]
+fore_ols_3m   = fore_ols_cum_scaled[:TRADING_MONTH]   # same vol_scale as the fitted line above
 fore_log_3m   = fore_log_price[:TRADING_MONTH]
 
 all_vals  = np.concatenate([
@@ -641,7 +672,7 @@ if len(fore_dates_3m):
     ax.plot([dates_ly[-1], fore_dates_3m[0]], [last_ols_fit_ly, fore_ols_3m[0]],
             color=ORANGE, lw=1.2, alpha=0.7, zorder=4)
     ax.plot(fore_dates_3m, fore_ols_3m, color=ORANGE, lw=2.0, ls="--", zorder=5,
-            label=(f"OLS 3M  end={fore_ols_3m[-1]:,.4f}  "
+            label=(f"OLS 3M vol-scaled  end={fore_ols_3m[-1]:,.4f}  "
                    f"({(fore_ols_3m[-1]/last_actual-1)*100:+.1f}%)"))
     ax.scatter([fore_dates_3m[-1]], [fore_ols_3m[-1]], color=ORANGE, s=60, zorder=8)
     ax.annotate(f"{fore_ols_3m[-1]:,.4f}",
@@ -689,13 +720,19 @@ st.markdown("<h2>🔍 Chart 2 — 90-Day OLS Forecast (Peaks & Troughs)</h2>", u
 
 FORECAST_DAYS = 90
 fore_dates_90 = fut_dates[:FORECAST_DAYS]
-fore_ols_90   = fore_ols_cum[:FORECAST_DAYS]
+fore_ols_90   = fore_ols_cum_scaled[:FORECAST_DAYS]   # same vol_scale as Chart 1
 
 last_6m_start = dates_all[-1] - pd.DateOffset(months=6)
 mask_6m       = dates_all >= last_6m_start
 dates_6m      = dates_all[mask_6m]
 actual_6m     = close_all[mask_6m]
-ols_fit_6m    = cumret_ols_fit[mask_6m]
+
+# Same calibration as Chart 1's fitted line, just re-anchored to this 6-month
+# window (start = actual_6m[0], end = last_actual), using the same global
+# ols_vol_scale so the two charts' OLS amplitude match.
+window_start_pos_6m = int(np.where(mask_6m)[0][0])
+ols_fit_6m           = calibrate_ols_fitted(y_fit_ols_full, actual_6m, window_start_pos_6m, ols_vol_scale)
+last_ols_fit_6m       = float(ols_fit_6m[-1])   # == last_actual by construction
 
 peak_idx, trough_idx = [], []
 if len(fore_ols_90) >= 7:
@@ -722,15 +759,16 @@ for sp in ax.spines.values(): sp.set_color(GREY)
 ax.tick_params(colors=WHITE, labelsize=8.5)
 
 ax.plot(dates_6m, actual_6m,  color=TEAL,   lw=2.5, zorder=6, label=f"Actual {stock_name} (6M)")
-ax.plot(dates_6m, ols_fit_6m, color=ORANGE, lw=1.4, alpha=0.80, zorder=4, label="OLS fitted")
+ax.plot(dates_6m, ols_fit_6m, color=ORANGE, lw=1.4, alpha=0.80, zorder=4,
+        label=f"OLS fitted (vol-matched ×{ols_vol_scale:,.1f}, anchored to start & end)")
 
 if len(fore_dates_90):
     ax.axvline(fore_dates_90[0], color=GOLD, lw=2.0, ls=":", alpha=0.95, zorder=5)
     ax.axvspan(fore_dates_90[0], fore_dates_90[-1], alpha=0.07, color=GOLD, zorder=1)
-    ax.plot([dates_6m[-1], fore_dates_90[0]], [last_ols_fit, fore_ols_90[0]],
+    ax.plot([dates_6m[-1], fore_dates_90[0]], [last_ols_fit_6m, fore_ols_90[0]],
             color=ORANGE, lw=1.2, alpha=0.7, zorder=4)
     ax.plot(fore_dates_90, fore_ols_90, color=ORANGE, lw=2.4, ls="--", zorder=5,
-            label=(f"OLS {FORECAST_DAYS}d  end={fore_ols_90[-1]:,.4f}  "
+            label=(f"OLS {FORECAST_DAYS}d vol-scaled  end={fore_ols_90[-1]:,.4f}  "
                    f"({(fore_ols_90[-1]/last_actual-1)*100:+.2f}%)"))
 
     all_y    = np.concatenate([actual_6m, ols_fit_6m, fore_ols_90])
@@ -784,28 +822,31 @@ plt.close(fig2)
 st.markdown("---")
 st.markdown("<h2>📉 Chart 3 — OLS Full-Period Forecast</h2>", unsafe_allow_html=True)
 
+fore_ols_cum_c3 = fore_ols_cum_scaled   # vol-scaled full-horizon forecast, same factor as Charts 1 & 2
+
 fig3, ax = plt.subplots(figsize=(20, 7), facecolor=BG)
 ax.set_facecolor("#0D0D28")
 for sp in ax.spines.values(): sp.set_color(GREY)
 ax.tick_params(colors=WHITE, labelsize=8.5)
 
-ax.fill_between(fut_dates, last_actual, fore_ols_cum,
-                where=(fore_ols_cum >= last_actual),
+ax.fill_between(fut_dates, last_actual, fore_ols_cum_c3,
+                where=(fore_ols_cum_c3 >= last_actual),
                 color="#00AA55", alpha=0.18, zorder=2, label="Cumulative gain")
-ax.fill_between(fut_dates, last_actual, fore_ols_cum,
-                where=(fore_ols_cum < last_actual),
+ax.fill_between(fut_dates, last_actual, fore_ols_cum_c3,
+                where=(fore_ols_cum_c3 < last_actual),
                 color="#FF3355", alpha=0.18, zorder=2, label="Cumulative loss")
 ax.axhline(last_actual, color=GOLD, lw=1.2, ls=":", alpha=0.8, zorder=3,
            label=f"Last actual: {last_actual:,.4f}")
-ax.plot(fut_dates, fore_ols_cum, color=ORANGE, lw=2.5, zorder=5, label="OLS forecast")
+ax.plot(fut_dates, fore_ols_cum_c3, color=ORANGE, lw=2.5, zorder=5,
+        label=f"OLS forecast (vol-matched ×{ols_vol_scale:,.1f})")
 
-peak_yr   = int(np.argmax(fore_ols_cum))
-trough_yr = int(np.argmin(fore_ols_cum))
+peak_yr   = int(np.argmax(fore_ols_cum_c3))
+trough_yr = int(np.argmin(fore_ols_cum_c3))
 for idx, col, marker, label_s in [
     (peak_yr,   "#FF4466", "^", "Peak"),
     (trough_yr, "#44FF88", "v", "Trough"),
 ]:
-    d = fut_dates[idx]; v = fore_ols_cum[idx]
+    d = fut_dates[idx]; v = fore_ols_cum_c3[idx]
     ax.scatter([d], [v], color=col, s=100, zorder=9, marker=marker)
     ax.axvline(d, color=col, lw=1.0, ls="--", alpha=0.6, zorder=4)
     va = "bottom" if marker == "^" else "top"
@@ -827,11 +868,11 @@ ax.xaxis.grid(True, which="major", color=GREY, alpha=0.40, lw=0.7)
 ax.yaxis.grid(True, color=GREY, alpha=0.25, lw=0.5)
 ax.set_ylabel("Price Level (OLS cumulative)", color=WHITE, fontsize=10)
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.2f}"))
-chg_pct3 = (fore_ols_cum[-1] / last_actual - 1) * 100
+chg_pct3 = (fore_ols_cum_c3[-1] / last_actual - 1) * 100
 ax.set_title(
-    f"{stock_name} ({ticker}) — OLS Forecast  "
+    f"{stock_name} ({ticker}) — OLS Forecast (vol-scaled for display)  "
     f"{fut_dates[0].strftime('%b %d, %Y')} → {fut_dates[-1].strftime('%b %d, %Y')}\n"
-    f"End: {fore_ols_cum[-1]:,.4f}  ({chg_pct3:+.2f}% vs last)  ·  Features: {n_avail}",
+    f"End: {fore_ols_cum_c3[-1]:,.4f}  ({chg_pct3:+.2f}% vs last, chart scale)  ·  Features: {n_avail}",
     color=GOLD, fontsize=11, fontweight="bold",
 )
 ax.legend(fontsize=9, facecolor="#1A1A38", labelcolor=WHITE, loc="upper left", ncol=2)
@@ -1180,6 +1221,7 @@ st.markdown(
     f"Features={n_avail} · Apply={orb_apply}° Sep={orb_sep}°</p>",
     unsafe_allow_html=True,
 )
+
 
 
 
