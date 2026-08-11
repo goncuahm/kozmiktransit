@@ -26,7 +26,6 @@ import streamlit as st
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import KFold
 from sklearn.metrics import (
     r2_score, accuracy_score, balanced_accuracy_score,
 )
@@ -326,6 +325,19 @@ with st.sidebar:
         options=ALL_PLANETS_ORDERED,
         default=DEFAULT_SIGN,
         help="Zodiac-sign dummy features are built for these planets.",
+    )
+
+    st.markdown("<hr class='gold'/>", unsafe_allow_html=True)
+
+    # ── Out-of-sample settings ─────────────────────────────────────────────────
+    st.markdown("### 🧪 Out-of-Sample Check")
+    oos_days = st.slider(
+        "Held-Out Window (trading days)",
+        min_value=10, max_value=250, value=60, step=5,
+        help=(
+            "OLS and Logistic are refit on everything before this window and "
+            "used to predict it with no knowledge of what actually happened."
+        ),
     )
 
     st.markdown("<hr class='gold'/>", unsafe_allow_html=True)
@@ -1215,98 +1227,143 @@ if len(asp_table):
     )
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CROSS-VALIDATION — 5-Fold Out-of-Sample Check
+#  OUT-OF-SAMPLE CHECK — Last N Days Held Out
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("---")
-st.markdown("<h2>🧪 Cross-Validation — 5-Fold Out-of-Sample</h2>", unsafe_allow_html=True)
+st.markdown(f"<h2>🧪 Out-of-Sample Check — Last {oos_days} Days</h2>", unsafe_allow_html=True)
 st.markdown(
     "<p style='color:#888;font-size:13px;margin-top:-8px;margin-bottom:16px'>"
-    "The selected history is split into 5 contiguous time blocks (using the "
-    "same features, orbs, and planet selections chosen above). Each fold "
-    "trains OLS + Logistic on the other 4 blocks and scores strictly "
-    "out-of-sample on the one held out — this is the honest read on how well "
-    "the current settings generalize, as opposed to the in-sample R² / "
-    "accuracy shown in the Model Summary section.</p>",
+    f"OLS and Logistic are refit on everything <em>before</em> the last {oos_days} "
+    "trading days, then used to predict that held-out window with no knowledge "
+    "of what actually happened. The fitted lines use the same vol-matching "
+    "scaling as the charts above, anchored to the last known actual price going "
+    "into the window — but, unlike those charts, the far end is <em>not</em> "
+    "forced to match the actual price. Any gap between fitted and actual here "
+    "is real out-of-sample error, not a display artifact.</p>",
     unsafe_allow_html=True,
 )
 
-CV_N_SPLITS = 5
-
-if len(dates_all) < CV_N_SPLITS * 20:
+if oos_days >= len(dates_all) - 50:
     st.warning(
-        f"Only {len(dates_all):,} trading days available — too few for a "
-        f"reliable {CV_N_SPLITS}-fold check. Pick an earlier Data Start Date "
-        "to enable cross-validation."
+        f"Not enough history before the {oos_days}-day out-of-sample window to "
+        "train on. Reduce the window in the sidebar or pick an earlier Data Start Date."
     )
 else:
-    with st.spinner("Running 5-fold cross-validation …"):
-        kf = KFold(n_splits=CV_N_SPLITS, shuffle=False)
-        cv_rows = []
-        for fold_i, (train_idx, test_idx) in enumerate(kf.split(X_con), start=1):
-            # OLS: refit on the training fold, score out-of-sample on the held-out fold
-            ols_fold        = sm.OLS(y_ret[train_idx], X_con[train_idx]).fit()
-            y_pred_ols_test = X_con[test_idx] @ np.asarray(ols_fold.params)
-            r2_fold         = r2_score(y_ret[test_idx], y_pred_ols_test)
+    with st.spinner("Refitting on the training period and predicting the held-out window …"):
+        oos_test_idx  = np.arange(len(dates_all) - oos_days, len(dates_all))
+        oos_train_idx = np.arange(0, len(dates_all) - oos_days)
 
-            # Logistic: scaler is refit on the training fold only (no leakage from the held-out fold)
-            scaler_fold = StandardScaler().fit(X_raw[train_idx])
-            X_train_sc  = scaler_fold.transform(X_raw[train_idx])
-            X_test_sc   = scaler_fold.transform(X_raw[test_idx])
-            log_fold = LogisticRegression(
-                C=0.1, penalty="l2", solver="lbfgs",
-                max_iter=1000, class_weight="balanced", random_state=42,
-            )
-            log_fold.fit(X_train_sc, y_dir[train_idx])
-            y_pred_log_test = log_fold.predict(X_test_sc)
-            acc_fold  = accuracy_score(y_dir[test_idx], y_pred_log_test)
-            bacc_fold = balanced_accuracy_score(y_dir[test_idx], y_pred_log_test)
+        # OLS — refit on the training period only, predict the held-out window
+        ols_oos        = sm.OLS(y_ret[oos_train_idx], X_con[oos_train_idx]).fit()
+        y_pred_ols_oos = X_con[oos_test_idx] @ np.asarray(ols_oos.params)
 
-            cv_rows.append({
-                "Fold":              fold_i,
-                "Test Start":        dates_all[test_idx[0]].date(),
-                "Test End":          dates_all[test_idx[-1]].date(),
-                "Test Days":         len(test_idx),
-                "OLS OOS R²":        round(float(r2_fold), 5),
-                "Logit OOS Acc":     round(float(acc_fold), 4),
-                "Logit OOS BalAcc":  round(float(bacc_fold), 4),
-            })
+        # Logistic — scaler AND model both refit on the training period only
+        scaler_oos     = StandardScaler().fit(X_raw[oos_train_idx])
+        X_train_oos_sc = scaler_oos.transform(X_raw[oos_train_idx])
+        X_test_oos_sc  = scaler_oos.transform(X_raw[oos_test_idx])
+        log_oos = LogisticRegression(
+            C=0.1, penalty="l2", solver="lbfgs",
+            max_iter=1000, class_weight="balanced", random_state=42,
+        )
+        log_oos.fit(X_train_oos_sc, y_dir[oos_train_idx])
+        y_pred_dir_oos = log_oos.predict(X_test_oos_sc)
 
-    cv_df = pd.DataFrame(cv_rows)
+        # Same scaling methodology as Charts 1–3 (calibrate/scale by variance
+        # ratio vs. realized volatility), but anchored at the START only — the
+        # last actual price before the window begins, which is the one point
+        # both the model and reality legitimately share. No endpoint forcing:
+        # that would hide the very forecast error this check exists to show.
+        anchor_price_oos = close_all[oos_train_idx[-1]]
+        actual_oos_std    = y_ret[oos_test_idx].std()
 
-    cv_r2_mean,  cv_r2_std  = cv_df["OLS OOS R²"].mean(),    cv_df["OLS OOS R²"].std()
-    cv_acc_mean, cv_acc_std = cv_df["Logit OOS Acc"].mean(), cv_df["Logit OOS Acc"].std()
-    cv_bacc_mean            = cv_df["Logit OOS BalAcc"].mean()
+        ols_dev_oos       = y_pred_ols_oos - y_pred_ols_oos.mean()
+        ols_fit_std_oos   = ols_dev_oos.std()
+        ols_oos_vol_scale = actual_oos_std / ols_fit_std_oos if ols_fit_std_oos > 1e-12 else 1.0
+        ols_fit_oos       = scale_ols_forecast(y_pred_ols_oos, anchor_price_oos, ols_oos_vol_scale)
 
-    cv1, cv2, cv3 = st.columns(3)
-    cv1.markdown(metric_html(
-        "OLS OOS R² (avg)", f"{cv_r2_mean:+.5f}",
-        f"± {cv_r2_std:.5f} across {CV_N_SPLITS} folds"
+        # Logistic's raw price line uses the same convention as the rest of
+        # the app: sign of the predicted direction × that day's realized
+        # |return| as the step magnitude, then the same vol-scale treatment.
+        lr_raw_steps_oos  = y_pred_dir_oos * np.abs(y_ret[oos_test_idx])
+        lr_dev_oos        = lr_raw_steps_oos - lr_raw_steps_oos.mean()
+        lr_fit_std_oos    = lr_dev_oos.std()
+        lr_oos_vol_scale  = actual_oos_std / lr_fit_std_oos if lr_fit_std_oos > 1e-12 else 1.0
+        lr_fit_oos        = scale_ols_forecast(lr_raw_steps_oos, anchor_price_oos, lr_oos_vol_scale)
+
+        oos_r2   = r2_score(y_ret[oos_test_idx], y_pred_ols_oos)
+        oos_acc  = accuracy_score(y_dir[oos_test_idx], y_pred_dir_oos)
+        oos_bacc = balanced_accuracy_score(y_dir[oos_test_idx], y_pred_dir_oos)
+
+    m1, m2, m3 = st.columns(3)
+    m1.markdown(metric_html(
+        "OOS OLS R²", f"{oos_r2:+.5f}", f"Last {oos_days}d, held out entirely"
     ), unsafe_allow_html=True)
-    cv2.markdown(metric_html(
-        "Logit OOS Accuracy (avg)", f"{cv_acc_mean:.4f}",
-        f"± {cv_acc_std:.4f} across {CV_N_SPLITS} folds"
+    m2.markdown(metric_html(
+        "OOS Logit Accuracy", f"{oos_acc:.4f}", f"BalAcc {oos_bacc:.4f}"
     ), unsafe_allow_html=True)
-    cv3.markdown(metric_html(
-        "Logit OOS Balanced Acc (avg)", f"{cv_bacc_mean:.4f}",
-        f"across {CV_N_SPLITS} folds"
+    m3.markdown(metric_html(
+        "Display Vol-Scale (OLS / Logit)", f"×{ols_oos_vol_scale:,.1f} / ×{lr_oos_vol_scale:,.1f}",
+        "Chart scaling only — not part of the metrics above"
     ), unsafe_allow_html=True)
 
-    def style_cv_df(df):
-        def row_color(row):
-            bg = "#0d0d28"
-            return [f"background-color:{bg};color:#E8E8F4"] * len(row)
-        return df.style.apply(row_color, axis=1).format({
-            "OLS OOS R²":       "{:+.5f}",
-            "Logit OOS Acc":    "{:.4f}",
-            "Logit OOS BalAcc": "{:.4f}",
-        })
+    # A little lead-in context before the held-out window starts
+    lead_in        = min(oos_days, len(oos_train_idx))
+    plot_start_idx = len(dates_all) - oos_days - lead_in
+    dates_oos_plot  = dates_all[plot_start_idx:]
+    actual_oos_plot = close_all[plot_start_idx:]
+    oos_start_date  = dates_all[oos_test_idx[0]]
 
-    st.dataframe(style_cv_df(cv_df), use_container_width=True)
+    fig5, ax = plt.subplots(figsize=(18, 6), facecolor=BG)
+    ax.set_facecolor("#0D0D28")
+    for sp in ax.spines.values(): sp.set_color(GREY)
+    ax.tick_params(colors=WHITE, labelsize=8)
 
+    ax.plot(dates_oos_plot, actual_oos_plot, color=TEAL, lw=2.5, zorder=6,
+            label=f"Actual {stock_name}")
+    ax.axvspan(oos_start_date, dates_all[-1], alpha=0.08, color=GOLD, zorder=1)
+    ax.axvline(oos_start_date, color=GOLD, lw=1.5, ls=":", alpha=0.9, zorder=5)
+    ax.text(oos_start_date, actual_oos_plot.max() * 1.002, "  Held out→",
+            color=GOLD, fontsize=8, va="bottom", fontweight="bold")
+
+    ax.plot(dates_all[oos_test_idx], ols_fit_oos, color=ORANGE, lw=2.0, ls="--", zorder=5,
+            label=f"OLS OOS (vol-scaled ×{ols_oos_vol_scale:,.1f})  end={ols_fit_oos[-1]:,.4f}")
+    ax.plot(dates_all[oos_test_idx], lr_fit_oos, color=GREEN, lw=2.0, ls="--", zorder=5,
+            label=f"Logit OOS (vol-scaled ×{lr_oos_vol_scale:,.1f})  end={lr_fit_oos[-1]:,.4f}")
+
+    ax.scatter([oos_start_date], [anchor_price_oos], color=TEAL, s=70, zorder=8,
+               label=f"OOS anchor: {anchor_price_oos:,.4f}")
+    ax.scatter([dates_all[-1]], [close_all[-1]], color=TEAL, s=70, zorder=8,
+               label=f"Actual end: {close_all[-1]:,.4f}")
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("Price Level", color=WHITE, fontsize=10)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.2f}"))
+    ax.set_title(
+        f"{stock_name} ({ticker}) — Out-of-Sample Check, Last {oos_days} Trading Days\n"
+        f"OLS R²={oos_r2:+.5f}  ·  Logit Acc={oos_acc:.4f}  ·  "
+        f"Trained on data before {oos_start_date.date()}",
+        color=GOLD, fontsize=11, fontweight="bold",
+    )
+    ax.legend(fontsize=8, facecolor="#1A1A38", labelcolor=WHITE, loc="upper left")
+    fig5.tight_layout()
+    st.image(fig_to_st(fig5), use_container_width=True)
+    plt.close(fig5)
+
+    oos_df = pd.DataFrame({
+        "date":                  dates_all[oos_test_idx],
+        "actual_close":          close_all[oos_test_idx],
+        "actual_log_return":     y_ret[oos_test_idx],
+        "ols_oos_pred_return":   y_pred_ols_oos,
+        "ols_oos_fitted_price":  ols_fit_oos,
+        "logit_oos_pred_dir":    y_pred_dir_oos,
+        "logit_oos_fitted_price": lr_fit_oos,
+    })
     st.download_button(
-        "📥 Cross-Validation CSV",
-        data=cv_df.to_csv(index=False).encode(),
-        file_name=f"{ticker.replace('=', '_')}_cv_results.csv",
+        "📥 Out-of-Sample CSV",
+        data=oos_df.to_csv(index=False).encode(),
+        file_name=f"{ticker.replace('=', '_')}_oos_last{oos_days}d.csv",
         mime="text/csv",
     )
 
