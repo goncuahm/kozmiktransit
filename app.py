@@ -256,6 +256,25 @@ def scale_ols_forecast(step_returns, anchor_price, vol_scale):
     return anchor_price * np.exp(np.cumsum(scaled_steps))
 
 
+def calibrate_log_fitted(y_fit_log_full, mean_abs_ret, actual_window, start_pos):
+    """
+    Same idea as calibrate_ols_fitted, applied to the logistic direction
+    fit: rebase so the cumulative path starts AND ends exactly on the
+    actual price for this window. The day-to-day UP/DOWN PATTERN (each
+    step's deviation from the model's own average step) is preserved
+    exactly -- only the average step size is adjusted to whatever value
+    makes the path land on the real ending price. This does not change
+    the model's predicted directions or its in-sample accuracy; it's a
+    visualization anchor only, exactly analogous to the OLS calibration.
+    """
+    steps = y_fit_log_full[start_pos:][1:] * mean_abs_ret   # drop day0 (baseline, no prior return)
+    dev = steps - steps.mean()
+    target_growth = np.log(actual_window[-1] / actual_window[0])
+    mean_target = target_growth / len(steps)
+    scaled_steps = mean_target + dev
+    return actual_window[0] * np.exp(np.concatenate([[0.0], np.cumsum(scaled_steps)]))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
@@ -638,11 +657,10 @@ window_start_pos = int(np.where(mask_ly)[0][0])
 # Charts 2 and 3 so the OLS line reads on one consistent scale everywhere).
 ols_fit_ly = calibrate_ols_fitted(y_fit_ols_full, actual_ly, window_start_pos, ols_vol_scale)
 
-# Logistic: cumulate signed-|return| steps within the window, same rebase
-log_step_win = y_fit_log_full[window_start_pos:] * mean_abs_ret
-log_fit_ly   = actual_ly[0] * np.exp(
-    np.cumsum(log_step_win) - log_step_win[0]
-)
+# Logistic: anchored to start AND end of the actual price window, same
+# idea as the OLS line above -- preserves the day-to-day up/down pattern,
+# forces the overall path to land exactly on the real ending price.
+log_fit_ly = calibrate_log_fitted(y_fit_log_full, mean_abs_ret, actual_ly, window_start_pos)
 
 # Endpoints of the rebased fitted series (used to connect to forecast lines)
 last_ols_fit_ly = float(ols_fit_ly[-1])
@@ -669,7 +687,7 @@ ax.plot(dates_ly, actual_ly,  color=TEAL,   lw=2.5, zorder=6,
 ax.plot(dates_ly, ols_fit_ly, color=ORANGE, lw=1.5, alpha=0.85, zorder=4,
         label=f"OLS fitted (vol-matched ×{ols_vol_scale:,.1f}, anchored to start & end)")
 ax.plot(dates_ly, log_fit_ly, color=GREEN,  lw=1.5, alpha=0.85, zorder=4,
-        label="Logistic fitted (rebased to window start)")
+        label="Logistic fitted (anchored to start & end)")
 
 if len(fore_dates_3m):
     ax.axvline(dates_ly[-1], color=GOLD, lw=1.5, ls=":", alpha=0.9, zorder=5)
