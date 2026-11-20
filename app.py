@@ -7,6 +7,13 @@ Changes vs v1:
   2. Chart 1 fitted lines rebased to actual price at window start (same scale)
   3. User can choose Inner Planets (multiselect, default kept)
   4. User can choose Sign Planets (multiselect, default kept)
+  5. Retrograde dummies (Retro Planets multiselect) — in BOTH the 12-sign and
+     the 360-degree model, consistent with the stand-alone script and newsletter
+  6. Feature timing: planet positions at the MIDPOINT of each return interval
+     (previous close → this close, UT, per market), interpolated from the daily
+     ephemeris computed at EPH_HOUR_UT (09:00 UT)
+  7. Price repair (index re-basings such as BIST ÷100 in July 2020; zero closes)
+  8. Crypto tickers: 7-day forecast calendar and 24:00 UTC close
 """
 
 import warnings
@@ -56,6 +63,11 @@ ALL_PLANETS_ORDERED = [
 ]
 DEFAULT_INNER = ["sun", "moon", "mercury", "venus", "mars"]
 DEFAULT_SIGN  = ["moon","sun","mercury", "venus", "mars"]
+DEFAULT_RETRO = ["mercury", "venus", "mars", "jupiter", "saturn",
+                 "uranus", "neptune", "pluto", "chiron"]
+
+# ── Feature timing (same convention as the stand-alone script / newsletter) ───
+EPH_HOUR_UT = 9.0   # hour (UT) at which each planet_degrees.csv row is computed
 
 ASPECTS   = [0, 60, 90, 120, 180]
 ASP_NAMES = {0: "Conj" ,60: "Sext", 90: "Sqr", 120: "Trin", 180: "Opp"}
@@ -173,9 +185,88 @@ def build_degree_dummies(eph_slice, feat_cols, sign_planets):
     return feat_cols
 
 
+def build_retro_dummies(eph_slice, feat_cols, retro_planets):
+    """'{planet}_retro' = 1 if the planet's longitude is decreasing (retrograde)."""
+    for planet in retro_planets:
+        if planet not in eph_slice.columns:
+            continue
+        lon    = eph_slice[planet].values.astype(float) % 360
+        motion = np.gradient(np.unwrap(lon, period=360))
+        feat_cols[f"{planet}_retro"] = (motion < 0).astype(float)
+    return feat_cols
+
+
+def is_crypto_ticker(t):
+    return t.upper().endswith(("-USD", "-USDT", "-EUR", "-BTC"))
+
+
+def market_for(t):
+    """(time zone, local close) used for feature timing."""
+    if is_crypto_ticker(t):
+        return dict(tz="UTC", close="24:00", crypto=True)       # Yahoo crypto bar ends 24:00 UTC
+    if t.endswith(".IS"):
+        return dict(tz="Europe/Istanbul", close="18:00", crypto=False)
+    if t.endswith("=F"):
+        return dict(tz="America/New_York", close="17:00", crypto=False)
+    return dict(tz="America/New_York", close="16:00", crypto=False)
+
+
+MKT          = dict(tz="America/New_York", close="16:00", crypto=False)  # set after sidebar
+FEATURE_TIME = "midpoint"                                                # set after sidebar
+
+
+def close_times_ut(date_index):
+    hh, mm = map(int, MKT["close"].split(":"))
+    local = (pd.DatetimeIndex(date_index).normalize()
+             + pd.Timedelta(hours=hh, minutes=mm))
+    return (local.tz_localize(MKT["tz"], nonexistent="shift_forward", ambiguous=False)
+                 .tz_convert("UTC").tz_localize(None))
+
+
+@st.cache_data(show_spinner=False)
+def eph_interp_tables(eph):
+    x = ((eph.index + pd.Timedelta(hours=EPH_HOUR_UT)).values
+         .astype("datetime64[s]").astype(np.int64) / 86400.0)
+    unw = {c: np.unwrap(eph[c].values.astype(float), period=360)
+           for c in eph.columns if c in ALL_PLANETS_ORDERED}
+    return x, unw
+
+
+def eph_at(eph, date_index, first_prev=None):
+    """Planet longitudes for date_index, read at the midpoint of each return
+    interval (FEATURE_TIME='midpoint'), at the close ('close'), or the raw
+    daily row ('date' = old behaviour)."""
+    date_index = pd.DatetimeIndex(date_index)
+    if FEATURE_TIME == "date":
+        return eph.reindex(date_index, method="ffill")
+    close_t = close_times_ut(date_index)
+    if FEATURE_TIME == "close":
+        t = close_t
+    else:
+        if first_prev is None:
+            step = pd.Timedelta(days=1) if MKT["crypto"] else pd.tseries.offsets.BDay(1)
+            first_prev = date_index[0] - step
+        prev_t = close_times_ut(date_index[:-1].insert(0, pd.Timestamp(first_prev)))
+        t = prev_t + (close_t - prev_t) / 2
+    ex, unw = eph_interp_tables(eph)
+    xq = t.values.astype("datetime64[s]").astype(np.int64) / 86400.0
+    return pd.DataFrame({c: np.interp(xq, ex, u) % 360 for c, u in unw.items()},
+                        index=date_index)
+
+
+def fix_redenomination(df):
+    """Rescale prices before an artificial jump (one-day ratio < 1/50 or > 50),
+    e.g. BIST indices divided by 100 in July 2020 (same rule as the newsletter)."""
+    ratio = df["Close"] / df["Close"].shift(1)
+    for dt, r in ratio[(ratio < 0.02) | (ratio > 50)].items():
+        factor = 10.0 ** round(np.log10(r))
+        df.loc[df.index < dt, "Close"] = df.loc[df.index < dt, "Close"] * factor
+    return df
+
+
 def build_features(date_index, eph, orb_apply, orb_sep, inner_planets, sign_planets,
-                    use_degree_dummies=False):
-    eph_al   = eph.reindex(date_index, method="ffill")
+                    use_degree_dummies=False, retro_planets=(), first_prev=None):
+    eph_al   = eph_at(eph, date_index, first_prev)
     avail    = [p for p in ALL_PLANETS_ORDERED if p in eph_al.columns]
     pairs    = valid_pairs(avail, inner_planets)
     all_used = sorted(set(p for pair in pairs for p in pair))
@@ -200,6 +291,7 @@ def build_features(date_index, eph, orb_apply, orb_sep, inner_planets, sign_plan
         feat_cols = build_degree_dummies(eph_al, feat_cols, sign_planets)
     else:
         feat_cols = build_sign_dummies(eph_al, feat_cols, sign_planets)
+    feat_cols = build_retro_dummies(eph_al, feat_cols, retro_planets)
 
     feat_df = pd.DataFrame(feat_cols, index=date_index)
     feat_df = feat_df.loc[:, (feat_df > 0).any(axis=0)]
@@ -207,34 +299,12 @@ def build_features(date_index, eph, orb_apply, orb_sep, inner_planets, sign_plan
 
 
 def build_forecast_features(fut_dates, eph, feature_cols, orb_apply, orb_sep,
-                             inner_planets, sign_planets, use_degree_dummies=False):
-    eph_fut  = eph.reindex(fut_dates, method="ffill")
-    avail    = [p for p in ALL_PLANETS_ORDERED if p in eph_fut.columns]
-    pairs    = valid_pairs(avail, inner_planets)
-    all_used = sorted(set(p for pair in pairs for p in pair))
-    lons     = {p: eph_fut[p].values.astype(float) % 360 for p in all_used}
-    motion   = {p: np.gradient(np.unwrap(lons[p], period=360)) for p in all_used}
-
-    feat_cols_d = {}
-    for pa, pb in pairs:
-        rel_motion = motion[pa] - motion[pb]
-        for asp in ASPECTS:
-            target     = (lons[pb] + asp) % 360
-            gap        = angular_diff(lons[pa], target)
-            abs_gap    = np.abs(gap)
-            applying   = (((rel_motion > 0) & (gap < 0)) |
-                          ((rel_motion < 0) & (gap > 0)))
-            separating = ~applying
-            base = f"{pa}_T_{pb}__{asp}"
-            feat_cols_d[f"{base}__apply"] = (applying   & (abs_gap <= orb_apply)).astype(float)
-            feat_cols_d[f"{base}__sep"]   = (separating & (abs_gap <= orb_sep)).astype(float)
-
-    if use_degree_dummies:
-        feat_cols_d = build_degree_dummies(eph_fut, feat_cols_d, sign_planets)
-    else:
-        feat_cols_d = build_sign_dummies(eph_fut, feat_cols_d, sign_planets)
-
-    fut_df = pd.DataFrame(feat_cols_d, index=fut_dates)
+                             inner_planets, sign_planets, use_degree_dummies=False,
+                             retro_planets=(), first_prev=None):
+    """Same features as build_features (aspects, sign/degree, retro, same timing),
+    aligned to the training columns."""
+    fut_df = build_features(fut_dates, eph, orb_apply, orb_sep, inner_planets,
+                            sign_planets, use_degree_dummies, retro_planets, first_prev)
     return fut_df.reindex(columns=feature_cols, fill_value=0.0).values
 
 
@@ -355,6 +425,24 @@ with st.sidebar:
         help="Zodiac-sign (or degree, see below) dummy features are built for these planets.",
     )
 
+    retro_planets = st.multiselect(
+        "Retro Planets (retrograde dummies)",
+        options=[p for p in ALL_PLANETS_ORDERED if p not in ("sun", "moon")],
+        default=DEFAULT_RETRO,
+        help=("A 0/1 retrograde dummy is added for each selected planet, in both the "
+              "12-sign and the 360° model. Leave empty for no retrograde features."),
+    )
+
+    feature_time = st.selectbox(
+        "Feature timing",
+        options=["midpoint", "close", "date"],
+        index=0,
+        help=("When the planets are read for each daily return. 'midpoint' (recommended): "
+              "halfway between the previous close and this close, in UT, using the "
+              "market's closing time. 'close': at this close. 'date': the raw daily "
+              "ephemeris row (old behaviour)."),
+    )
+
     st.markdown("<hr class='gold'/>", unsafe_allow_html=True)
 
     # ── Statistical controls ──────────────────────────────────────────────────
@@ -396,6 +484,11 @@ with st.sidebar:
 
     st.markdown("<hr class='gold'/>", unsafe_allow_html=True)
     run_btn = st.button("⚡ Run Analysis")
+
+
+MKT          = market_for(ticker.strip())
+FEATURE_TIME = feature_time
+FORECAST_FREQ = "D" if MKT["crypto"] else "B"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -479,6 +572,9 @@ with st.spinner(f"Downloading {ticker} from Yahoo Finance …"):
             raw.columns = raw.columns.get_level_values(0)
         raw["Close"]      = pd.to_numeric(raw["Close"], errors="coerce")
         raw               = raw[["Close"]].dropna()
+        raw               = raw[raw["Close"] > 0]
+        raw.index         = pd.to_datetime(raw.index).tz_localize(None)
+        raw               = fix_redenomination(raw)
         raw["log_price"]  = np.log(raw["Close"])
         raw["log_return"] = raw["log_price"].diff()
         raw               = raw.dropna(subset=["log_return"])
@@ -519,14 +615,16 @@ else:
 # ══════════════════════════════════════════════════════════════════════════════
 with st.spinner("Building feature matrix …"):
     feat_all     = build_features(dates_all, eph, orb_apply, orb_sep,
-                                  inner_planets, sign_planets, use_degree_dummies)
+                                  inner_planets, sign_planets, use_degree_dummies,
+                                  retro_planets)
     feature_cols = feat_all.columns.tolist()   # astro-only columns (aspects + signs/degrees)
     n_avail      = len(feature_cols)
     pairs_used   = valid_pairs(
         [p for p in ALL_PLANETS_ORDERED if p in eph.columns], inner_planets
     )
-    n_sign_cols = sum(1 for c in feature_cols if "_sign_" in c or "_deg_" in c)
-    n_asp_cols  = n_avail - n_sign_cols
+    n_sign_cols  = sum(1 for c in feature_cols if "_sign_" in c or "_deg_" in c)
+    n_retro_cols = sum(1 for c in feature_cols if c.endswith("_retro"))
+    n_asp_cols   = n_avail - n_sign_cols - n_retro_cols
     X_astro_raw = feat_all.values
 
     # Lag column appended AFTER the astro columns, kept separate from
@@ -546,12 +644,13 @@ st.markdown(
     f"<div class='metric-card'><span class='metric-label'>Features built</span><br>"
     f"<span class='metric-value'>{n_avail}{' + 1 lag' if include_lag else ''}</span> "
     f"<span class='metric-sub'>"
-    f"{n_asp_cols} aspect + {n_sign_cols} {_dummy_label}"
+    f"{n_asp_cols} aspect + {n_sign_cols} {_dummy_label} + {n_retro_cols} retro"
     f"{' + 1 AR(1) lag-return feature' if include_lag else ''} · "
     f"{len(pairs_used)} planet pairs · "
     f"Apply {orb_apply}° / Sep {orb_sep}° · "
     f"Inner: {', '.join(inner_planets)} · "
-    f"Sign: {', '.join(sign_planets) if sign_planets else 'none'}"
+    f"Sign: {', '.join(sign_planets) if sign_planets else 'none'} · "
+    f"Timing: {FEATURE_TIME} (close {MKT['close']} {MKT['tz']})"
     f"</span></div>",
     unsafe_allow_html=True,
 )
@@ -603,7 +702,7 @@ with st.spinner("Generating forecast …"):
     fut_dates      = pd.date_range(
         start=forecast_start,
         end=forecast_end.strftime("%Y-%m-%d"),
-        freq="B",
+        freq=FORECAST_FREQ,
     )
     n_fut = len(fut_dates)
 
@@ -612,7 +711,7 @@ with st.spinner("Generating forecast …"):
     # knows how to compute ephemeris-derived features for future dates.
     X_fut = build_forecast_features(
         fut_dates, eph, feature_cols, orb_apply, orb_sep, inner_planets,
-        sign_planets, use_degree_dummies,
+        sign_planets, use_degree_dummies, retro_planets, first_prev=dates_all[-1],
     )
     ols_params   = np.asarray(ols_full.params)
     mean_abs_ret = np.abs(y_ret).mean()
@@ -1139,11 +1238,11 @@ with st.spinner("Computing active aspects …"):
     window_end   = last_date + pd.Timedelta(days=30)
     past_dates_w = dates_all[dates_all >= window_start]
     fut_dates_w  = pd.date_range(
-        start=last_date + pd.Timedelta(days=1), end=window_end, freq="B"
+        start=last_date + pd.Timedelta(days=1), end=window_end, freq=FORECAST_FREQ
     )
     all_win_d = past_dates_w.append(fut_dates_w)
 
-    eph_win  = eph.reindex(all_win_d, method="ffill")
+    eph_win  = eph_at(eph, all_win_d)
     avail_w  = [p for p in ALL_PLANETS_ORDERED if p in eph_win.columns]
     pairs_w  = valid_pairs(avail_w, inner_planets)
     all_uw   = sorted(set(p for pr in pairs_w for p in pr))
@@ -1226,7 +1325,7 @@ if use_degree_dummies:
 else:
     st.markdown("<h2>♈ Current Zodiac Signs</h2>", unsafe_allow_html=True)
 
-eph_today = eph.reindex([last_date], method="ffill")
+eph_today = eph_at(eph, dates_all[-2:]).iloc[[-1]]   # same moment as the model
 sign_rows = []
 position_col_name = "Degree °" if use_degree_dummies else "Sign"
 for planet in sign_planets:
@@ -1277,7 +1376,7 @@ else:
 #  LAST 10 DAYS SIGNAL TABLE
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("---")
-st.markdown("<h2>🕐 Last 10 Trading Days — Directional Signal</h2>", unsafe_allow_html=True)
+st.markdown("<h2>🕐 Last 100 Trading Days — Directional Signal (in-sample)</h2>", unsafe_allow_html=True)
 
 n_total   = len(dates_all)
 last100    = list(range(max(0, n_total - 100), n_total))
@@ -1385,7 +1484,8 @@ st.markdown(
     f"<p style='text-align:center;color:#555;font-size:11px;letter-spacing:1px'>"
     f"PLANETARY REGRESSION · {stock_name} ({ticker}) · "
     f"OLS R²={ols_is_r2:.4f} · Logit Acc={log_is_acc:.4f} · "
-    f"Features={n_avail} · Apply={orb_apply}° Sep={orb_sep}°</p>",
+    f"Features={n_avail} · Apply={orb_apply}° Sep={orb_sep}° · "
+    f"Retro={len(retro_planets)} · Timing={FEATURE_TIME}</p>",
     unsafe_allow_html=True,
 )
 
